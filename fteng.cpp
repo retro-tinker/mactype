@@ -572,6 +572,7 @@ BOOL FreeTypeFontEngine::RemoveFont(LPCWSTR FontName)
 	free(c_fontarray); //利用原始指针释放
 	if (bIsFontFileLoaded)	//若字体文件被使用过，则需要清楚所有DC
 	{
+		CCriticalSectionLock __lockTls(CCriticalSectionLock::CS_TLSDATA);
 		CTLSDCArray::iterator iter = TLSDCArray.begin();
 		while (iter!=TLSDCArray.end())
 		{

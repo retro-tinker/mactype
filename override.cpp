@@ -626,6 +626,7 @@ BOOL WINAPI IMPL_BeginPath(HDC hdc)
 	BOOL ret=ORIG_BeginPath(hdc);
 	if (ret)
 	{
+		CCriticalSectionLock __lock(CCriticalSectionLock::CS_PATHDC);
 		DCArray.insert(hdc);
 	}
 	return ret;
@@ -637,6 +638,7 @@ BOOL WINAPI IMPL_EndPath(HDC hdc)
 	BOOL ret=ORIG_EndPath(hdc);
 	if (ret)
 	{
+		CCriticalSectionLock __lock(CCriticalSectionLock::CS_PATHDC);
 		DCArray.erase(hdc);
 	}
 	return ret;
@@ -648,6 +650,7 @@ BOOL WINAPI IMPL_AbortPath(HDC hdc)
 	BOOL ret=ORIG_AbortPath(hdc);
 	if (ret)
 	{
+		CCriticalSectionLock __lock(CCriticalSectionLock::CS_PATHDC);
 		DCArray.erase(hdc);
 	}
 	return ret;
@@ -1136,7 +1139,12 @@ BOOL WINAPI IMPL_ExtTextOutW(HDC hdc, int nXStart, int nYStart, UINT fuOptions, 
 		return ORIG_ExtTextOutW(hdc, nXStart, nYStart, fuOptions, lprc, lpString, cbString, lpDx);
 	}
 
-	if (DCArray.find(hdc)!=DCArray.end())
+	bool bDCInPath;
+	{
+		CCriticalSectionLock __lock(CCriticalSectionLock::CS_PATHDC);
+		bDCInPath = DCArray.find(hdc) != DCArray.end();
+	}
+	if (bDCInPath)
 		return ORIG_ExtTextOutW(hdc, nXStart, nYStart, fuOptions, lprc, lpString, cbString, lpDx);
 
 	if (!(fuOptions & ETO_GLYPH_INDEX) && !(fuOptions & ETO_IGNORELANGUAGE) && !lpDx && CID.myiscomplexscript(lpString,cbString))		//complex script
