@@ -132,6 +132,8 @@ public:
 		CS_VIRTMEM,
 		CS_DWRITE,
 		CS_DCRELATION,
+		CS_PATHDC,		// guards DCArray (DCs currently inside BeginPath/EndPath)
+		CS_TLSDATA,		// guards TLSDCArray and the CTlsData object list
 	};
 	CCriticalSectionLock(int index=CS_LIBRARY):
 	  m_index(index)

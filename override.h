@@ -71,10 +71,12 @@ public:
 	CThreadLocalInfo()
 		: m_bInExtTextOut(false), m_bInUniscribe(false), m_bInPath(false), m_bInUniTextOut(false)
 	{
+		CCriticalSectionLock __lock(CCriticalSectionLock::CS_TLSDATA);
 		TLSDCArray.insert(&m_bmpCache);
 	}
 	~CThreadLocalInfo()
 	{
+		CCriticalSectionLock __lock(CCriticalSectionLock::CS_TLSDATA);
 		TLSDCArray.erase(&m_bmpCache);
 	}
 

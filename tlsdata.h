@@ -27,6 +27,7 @@ public:
 			return NULL;
 		}
 		if(pArray) {
+			CCriticalSectionLock __lock(CCriticalSectionLock::CS_TLSDATA);
 			pArray->Add(pT);
 		}
 		return pT;
@@ -71,6 +72,7 @@ public:
 		T* pT = reinterpret_cast<T*>(::TlsGetValue(tlsindex));
 		if(pT) {
 			if (pArray) {
+				CCriticalSectionLock __lock(CCriticalSectionLock::CS_TLSDATA);
 				pArray->Remove(pT);
 			}
 			delete pT;
