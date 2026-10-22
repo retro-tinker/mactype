@@ -1,0 +1,168 @@
+# MacType 自動ビルド
+# 依存ライブラリ（FreeType / IniParser / wow64ext / Detours）を毎回ソースからビルドして、
+# MacType本体（Rel+Detours構成）を 32bit / 64bit の両方でビルドする。
+# できたDLLとEXEは、実行結果ページの「Artifacts」からダウンロードできる。
+
+name: Build MacType
+
+on:
+  push:
+    paths-ignore:
+      - '**.md'
+      - 'doc/**'
+  pull_request:
+  workflow_dispatch:   # Actionsタブから手動で実行できるようにする
+
+jobs:
+  build:
+    # windows-latest は VS 2026（v145ツールセットのみ）に切り替わっているため、
+    # MacTypeが前提にしている VS 2022（v143）が入っている windows-2022 を使う
+    runs-on: windows-2022
+
+    steps:
+      # ---------- ソースの取得 ----------
+      - name: Checkout MacType
+        uses: actions/checkout@v6
+        with:
+          path: mactype
+
+      - name: Checkout FreeType (MacType用カスタム版)
+        uses: actions/checkout@v6
+        with:
+          repository: snowie2000/freetype
+          path: deps/freetype
+
+      - name: Checkout IniParser
+        uses: actions/checkout@v6
+        with:
+          repository: snowie2000/IniParser
+          path: deps/IniParser
+
+      - name: Checkout wow64ext
+        uses: actions/checkout@v6
+        with:
+          repository: snowie2000/rewolf-wow64ext
+          path: deps/wow64ext
+
+      - name: Checkout Detours
+        uses: actions/checkout@v6
+        with:
+          repository: microsoft/Detours
+          path: deps/Detours
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # ---------- 依存ライブラリのビルド ----------
+      - name: Build FreeType
+        shell: pwsh
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          foreach ($p in 'Win32', 'x64') {
+            msbuild deps\freetype\builds\windows\vc2010\freetype.vcxproj /m /nologo /v:m `
+              "/p:Configuration=Release Static" /p:Platform=$p `
+              /p:OutDir=$root\out\freetype\$p\
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+
+      - name: Build IniParser
+        shell: pwsh
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          foreach ($p in 'Win32', 'x64') {
+            # 元のプロジェクトは古いツールセット(v140_xp)指定なので、v143に上書きしてビルド
+            msbuild deps\IniParser\IniParser\IniParser.vcxproj /m /nologo /v:m `
+              /p:Configuration=Release /p:Platform=$p `
+              /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0 `
+              /p:OutDir=$root\out\iniparser\$p\
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+
+      - name: Build wow64ext (32bitのみ必要)
+        shell: pwsh
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          msbuild deps\wow64ext\src\wow64ext.vcxproj /m /nologo /v:m `
+            /p:Configuration=Release /p:Platform=Win32 `
+            /p:OutDir=$root\out\wow64ext\
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Build Detours (x86)
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set VSPATH=%%i
+          call "%VSPATH%\VC\Auxiliary\Build\vcvarsall.bat" x86 || exit /b 1
+          cd deps\Detours\src || exit /b 1
+          nmake || exit /b 1
+
+      - name: Build Detours (x64)
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set VSPATH=%%i
+          call "%VSPATH%\VC\Auxiliary\Build\vcvarsall.bat" x64 || exit /b 1
+          cd deps\Detours\src || exit /b 1
+          nmake || exit /b 1
+
+      # ---------- ライブラリをMacTypeが探す場所に並べる ----------
+      - name: Collect libraries
+        shell: pwsh
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          $lib  = "$root\mactype\lib"
+          New-Item -ItemType Directory -Force $lib | Out-Null
+
+          Copy-Item "$root\out\freetype\Win32\freetype.lib"  "$lib\freetype.lib"
+          Copy-Item "$root\out\freetype\x64\freetype.lib"    "$lib\freetype64.lib"
+          Copy-Item "$root\out\iniparser\Win32\IniParser.lib"   "$lib\iniparser.lib"
+          Copy-Item "$root\out\iniparser\x64\IniParser64.lib"   "$lib\iniparser64.lib"
+          Copy-Item "$root\out\wow64ext\wow64ext.lib"        "$lib\wow64ext.lib"
+          Copy-Item "$root\deps\Detours\lib.X86\detours.lib" "$lib\detours.lib"
+          Copy-Item "$root\deps\Detours\lib.X64\detours.lib" "$lib\detours64.lib"
+
+          # macloader はライブラリの場所を指定していないので、MacTypeのルートにもDetoursを置く
+          Copy-Item "$lib\detours.lib"   "$root\mactype\detours.lib"
+          Copy-Item "$lib\detours64.lib" "$root\mactype\detours64.lib"
+
+          Get-ChildItem $lib
+
+      # ---------- MacType本体のビルド ----------
+      - name: Build MacType
+        shell: pwsh
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          $env:FREETYPE_PATH   = "$root\deps\freetype"
+          $env:INI_PARSER_PATH = "$root\deps\IniParser"
+          foreach ($p in 'Win32', 'x64') {
+            msbuild mactype\gdipp.sln /m /nologo /v:m `
+              "/p:Configuration=Rel+Detours" /p:Platform=$p
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+
+      # ---------- 成果物をまとめてアップロード ----------
+      - name: Collect output
+        shell: pwsh
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          $dist = "$root\dist"
+          New-Item -ItemType Directory -Force $dist | Out-Null
+          $dirs = @(
+            "$root\mactype\Rel+Detours",
+            "$root\mactype\x64\Rel+Detours",
+            "$root\mactype\Release",
+            "$root\mactype\x64\Release"
+          )
+          foreach ($d in $dirs) {
+            if (Test-Path -LiteralPath $d) {
+              Get-ChildItem -LiteralPath $d -File |
+                Where-Object { $_.Extension -in '.dll', '.exe', '.pdb' } |
+                Copy-Item -Destination $dist
+            }
+          }
+          Get-ChildItem $dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: MacType-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
