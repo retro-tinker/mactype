@@ -186,13 +186,16 @@ void ChangeFileName(LPWSTR lpSrc, int nSize, LPCWSTR lpNewFileName) {
 
 std::string WstringToString(const std::wstring str)
 {// wstringתstring
-	unsigned len = str.size() * 4;
+	if (str.empty())
+		return std::string();
 	setlocale(LC_CTYPE, "");
-	char *p = new char[len];
-	wcstombs(p, str.c_str(), len);
-	std::string str1(p);
-	delete[] p;
-	return str1;
+	size_t len = str.size() * 4 + 1;
+	std::string out(len, '\0');
+	size_t n = wcstombs(&out[0], str.c_str(), len);
+	if (n == (size_t)-1)
+		return std::string();
+	out.resize(n);
+	return out;
 }
 
 // make a unique name with fullname + crc32_of_fullname + familyname +stylename

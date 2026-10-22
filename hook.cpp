@@ -469,10 +469,12 @@ void EZHookMain(HINSTANCE instance, DWORD reason, LPVOID lpReserved) {
 	case DLL_PROCESS_ATTACH:
 	{
 		LPWSTR dllPath = new WCHAR[MAX_PATH + 1];
-		int nSize = GetModuleFileName(g_dllInstance, dllPath, MAX_PATH + 1);
-		WCHAR* p = &dllPath[nSize];
-		while (*--p != L'\\');
-		*p = L'\0';
+		dllPath[0] = L'\0';
+		GetModuleFileName(g_dllInstance, dllPath, MAX_PATH);
+		dllPath[MAX_PATH] = L'\0';
+		WCHAR* p = wcsrchr(dllPath, L'\\');
+		if (p)
+			*p = L'\0';
 #ifdef _WIN64
 		wcscat(dllPath, L"\\easyhk64.dll");
 #else

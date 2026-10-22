@@ -76,7 +76,7 @@ const wstring GetAppDir() {
 	}
 	WCHAR name[MAX_PATH] = { 0 };
 
-	int nSize = GetModuleFileName(NULL, name, MAX_PATH + 1);
+	int nSize = GetModuleFileName(NULL, name, MAX_PATH);
 	PathRemoveFileSpec(name);
 	AppDir = wstring(name) + L"\\"; // path should always end with a "\"
 	AppDir = LowerCase(AppDir);
@@ -1329,31 +1329,41 @@ void CFontLinkInfo::init()
 	//GetVersionEx(&sOsVinfo);	//获得操作系统版本号
 	//const CGdippSettings* pSettings = CGdippSettings::GetInstance();
 
-	WCHAR* name = new WCHAR[0x2000];
+	const DWORD nBufChars = 0x2000;
+	// unique_ptr: the function has early returns that used to leak these buffers
+	std::unique_ptr<WCHAR[]> nameBuf(new WCHAR[nBufChars]);
+	std::unique_ptr<WCHAR[]> valueBuf(new WCHAR[nBufChars]);
+	std::unique_ptr<WCHAR[]> bufBuf(new WCHAR[nBufChars]);
+	WCHAR* name = nameBuf.get();
 	DWORD namesz;
 	DWORD valuesz;
-	WCHAR* value = new WCHAR[0x2000];
-	WCHAR* buf = new WCHAR[0x2000];
-	const DWORD nBufSize = 0x2000 * sizeof(WCHAR);
+	WCHAR* value = valueBuf.get();
+	WCHAR* buf = bufBuf.get();
+	const DWORD nBufSize = nBufChars * sizeof(WCHAR);
+	// RegEnumValue does not guarantee termination; keep room for a double NUL (REG_MULTI_SZ)
+	const DWORD nValueBytes = nBufSize - 2 * sizeof(WCHAR);
 	LONG rc;
 	DWORD regtype;
 
 	for (int k = 0; ; ++k) {	//获得字体柄蛐的所有字虂E
-		namesz = nBufSize;
-		valuesz = nBufSize;
+		namesz = nBufChars;
+		valuesz = nValueBytes;
 		rc = RegEnumValue(h2, k, name, &namesz, 0, &regtype, (LPBYTE)value, &valuesz);		//从字体柄蛐寻找
 		if (rc == ERROR_NO_MORE_ITEMS) break;
 		if (rc != ERROR_SUCCESS) break;
+		value[valuesz / sizeof(WCHAR)] = 0;
+		value[valuesz / sizeof(WCHAR) + 1] = 0;
 		if (regtype != REG_SZ) continue;
 		StringCchCopy(buf, nBufSize / sizeof(buf[0]), name);
-		if (buf[wcslen(buf) - 1] == L')') {				//去掉括号
+		size_t buflen = wcslen(buf);
+		if (buflen && buf[buflen - 1] == L')') {				//去掉括号
 			LPWSTR p;
 			if ((p = wcsrchr(buf, L'(')) != NULL) {
 				*p = 0;
 			}
 		}
-		while (buf[wcslen(buf)-1] == L' ')
-			buf[wcslen(buf)-1] = 0;
+		while ((buflen = wcslen(buf)) != 0 && buf[buflen - 1] == L' ')
+			buf[buflen - 1] = 0;
 		//获得的对应的字体脕E
 		FontNameCache.Add(value, buf);
 	}
@@ -1364,11 +1374,13 @@ void CFontLinkInfo::init()
 	for (int i = 0; row < INFOMAX; ++i) {
 		int col = 0;
 
-		namesz = nBufSize;
-		valuesz = nBufSize;
+		namesz = nBufChars;
+		valuesz = nValueBytes;
 		rc = RegEnumValue(h1, i, name, &namesz, 0, &regtype, (LPBYTE)value, &valuesz);	//获得一个字体的字体链接
 		if (rc == ERROR_NO_MORE_ITEMS) break;
 		if (rc != ERROR_SUCCESS) break;
+		value[valuesz / sizeof(WCHAR)] = 0;
+		value[valuesz / sizeof(WCHAR) + 1] = 0;
 		if (regtype != REG_MULTI_SZ) continue;		//有效的字体链接
 		//获得字体的真实名字
 		
@@ -1504,24 +1516,26 @@ void CFontLinkInfo::init()
 
 	for (int i=0; i<0xff; ++i)
 	{
-		namesz = nBufSize;
-		valuesz = nBufSize;
+		namesz = nBufChars;
+		valuesz = nValueBytes;
 		rc = RegEnumValue(h4, i, name, &namesz, 0, &regtype, (LPBYTE)value, &valuesz);	//获得一个charset的值
 		if (rc == ERROR_NO_MORE_ITEMS) break;
 		if (rc != ERROR_SUCCESS) break;
+		value[valuesz / sizeof(WCHAR)] = 0;
+		value[valuesz / sizeof(WCHAR) + 1] = 0;
 		if (regtype != REG_SZ) continue;
 		if (_tcsicmp(value, _T("YES")))
 		{
 			TCHAR* p = name;
 			while (*p!=_T('(') && p-name<(int)namesz) ++p;
-			++p;
-			AllowDefaultLink[_tcstol(p,NULL,16)]=false;
+			if (*p == _T('(')) {
+				long charset = _tcstol(p + 1, NULL, 16);
+				if (charset >= 0 && charset < (long)countof(AllowDefaultLink))
+					AllowDefaultLink[charset] = false;
+			}
 		}
 	}
 	RegCloseKey(h4);
-	delete[]name;
-	delete[]value;
-	delete[]buf;
 }
 
 void CFontLinkInfo::clear()
