@@ -178,11 +178,13 @@ private:
 	std::vector<double> RGB2CRT;	//table used for RGB<->Lab
 public:
 	static const int BASE;
+	// P-01: conv2() relies on BASE * BASE / TBL2_LAST == 1 << CONV2_SHIFT (static_assert below the class).
+	enum { TBL2_LAST = 256 * 16, CONV2_SHIFT = 16 };
 public:
 	CAlphaBlend() :
 		alphatbl(256),
 		tbl1(257),
-		tbl2(256 * 16 + 1),
+		tbl2(TBL2_LAST + 1),
 		tunetbl(256),
 		tunetblR(256),
 		tunetblG(256),
@@ -206,7 +208,9 @@ public:
 		return tbl1[n];
 	}
 	inline BYTE conv2(int n) {
-		return tbl2[n / (BASE * BASE / (tbl2.size() - 1))];
+		// P-01: same index as n / (BASE * BASE / (tbl2.size() - 1)) for every int n on Win32 and x64.
+		// That division was done in size_t and its divisor is 1 << CONV2_SHIFT.
+		return tbl2[(size_t)n >> CONV2_SHIFT];
 	}
 private:
 	inline int convalpha(int alpha) {
@@ -215,6 +219,8 @@ private:
 	inline BYTE rconv1(int n);
 };
 const int CAlphaBlend::BASE = 0x4000;
+static_assert(CAlphaBlend::BASE * CAlphaBlend::BASE / CAlphaBlend::TBL2_LAST == 1 << CAlphaBlend::CONV2_SHIFT,
+	"P-01: conv2() needs BASE * BASE / TBL2_LAST == 1 << CONV2_SHIFT");
 
 static CAlphaBlend s_AlphaBlendTable;
 
