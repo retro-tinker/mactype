@@ -578,6 +578,9 @@ BOOL FreeTypeFontEngine::RemoveFont(LPCWSTR FontName)
 	free(c_fontarray); //利用原始指针释放
 	if (bIsFontFileLoaded)	//若字体文件被使用过，则需要清楚所有DC
 	{
+		// S-03: keep other threads from inserting / erasing (first draw, thread exit) while walking the set.
+		// A thread that exits meanwhile waits in ~CThreadLocalInfo, so its CBitmapCache stays valid here.
+		CCriticalSectionLock __lockTls(CCriticalSectionLock::CS_TLSDATA);
 		CTLSDCArray::iterator iter = TLSDCArray.begin();
 		while (iter!=TLSDCArray.end())
 		{

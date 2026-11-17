@@ -27,6 +27,8 @@ public:
 			return NULL;
 		}
 		if(pArray) {
+			// S-03: threads add here on their first draw and remove in ThreadTerm; the array itself is not thread safe.
+			CCriticalSectionLock __lock(CCriticalSectionLock::CS_TLSDATA);
 			pArray->Add(pT);
 		}
 		return pT;
@@ -71,6 +73,9 @@ public:
 		T* pT = reinterpret_cast<T*>(::TlsGetValue(tlsindex));
 		if(pT) {
 			if (pArray) {
+				// S-03: this runs under the loader lock (DLL_THREAD_DETACH). Only the array update is locked;
+				// delete pT stays outside because the destructor of T may call GDI.
+				CCriticalSectionLock __lock(CCriticalSectionLock::CS_TLSDATA);
 				pArray->Remove(pT);
 			}
 			delete pT;
