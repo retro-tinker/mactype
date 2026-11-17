@@ -1,0 +1,209 @@
+# T-01: 描画結果の機械的な比較（docs/kaizo-plan.md 4 章 段階 0）
+# 改造前（base、既定は directwrite ブランチ）と改造後（このコミット）の Core DLL を同じ手順・同じ依存ライブラリで
+# ビルドし、同じランナー上で tools/t01/t01.exe を動かして画素のハッシュを比べる。違えばジョブを失敗させる。
+# ログと結果（*.tsv、*.log、summary.md、使った DLL）は Artifacts（T01-<構成>-<SHA>）に残す。
+
+name: T-01 render check
+
+on:
+  push:
+    paths-ignore:
+      - '**.md'
+      - 'doc/**'
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: '比べる元（改造前）のブランチ・タグ・コミット'
+        default: 'directwrite'
+      force_font_fallback:
+        description: '日本語フォントがあっても、ダウンロードしたフォント（M PLUS 1p）を使う'
+        type: boolean
+        default: false
+
+jobs:
+  t01:
+    runs-on: windows-2022   # build.yml と同じ（VS 2022 / v143）
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [Win32, x64]
+    env:
+      BASE_REF: ${{ github.event.inputs.base_ref || 'directwrite' }}
+      PLATFORM: ${{ matrix.platform }}
+
+    steps:
+      # ---------- ソースの取得 ----------
+      - name: Checkout head (this commit)
+        uses: actions/checkout@v6
+        with:
+          path: mactype
+
+      - name: Checkout base (${{ env.BASE_REF }})
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.BASE_REF }}
+          path: base
+
+      - name: Checkout FreeType (MacType用カスタム版)
+        uses: actions/checkout@v6
+        with:
+          repository: snowie2000/freetype
+          path: deps/freetype
+
+      - name: Checkout IniParser
+        uses: actions/checkout@v6
+        with:
+          repository: snowie2000/IniParser
+          path: deps/IniParser
+
+      - name: Checkout wow64ext
+        if: matrix.platform == 'Win32'
+        uses: actions/checkout@v6
+        with:
+          repository: snowie2000/rewolf-wow64ext
+          path: deps/wow64ext
+
+      - name: Checkout Detours
+        uses: actions/checkout@v6
+        with:
+          repository: microsoft/Detours
+          path: deps/Detours
+
+      - name: Record commits
+        shell: pwsh
+        run: |
+          foreach ($d in 'mactype', 'base', 'deps/freetype', 'deps/IniParser', 'deps/Detours', 'deps/wow64ext') {
+            if (Test-Path $d) { "{0,-16} {1}" -f $d, (git -C $d rev-parse HEAD) }
+          }
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # ---------- 依存ライブラリ（base と head で同じものを使う） ----------
+      - name: Build FreeType / IniParser / wow64ext
+        shell: pwsh
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          $p = $env:PLATFORM
+          msbuild deps\freetype\builds\windows\vc2010\freetype.vcxproj /m /nologo /v:m `
+            "/p:Configuration=Release Static" /p:Platform=$p /p:OutDir=$root\out\freetype\$p\
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          msbuild deps\IniParser\IniParser\IniParser.vcxproj /m /nologo /v:m `
+            /p:Configuration=Release /p:Platform=$p `
+            /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0 `
+            /p:OutDir=$root\out\iniparser\$p\
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ($p -eq 'Win32') {
+            msbuild deps\wow64ext\src\wow64ext.vcxproj /m /nologo /v:m `
+              /p:Configuration=Release /p:Platform=Win32 /p:OutDir=$root\out\wow64ext\
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+
+      - name: Build Detours
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set VSPATH=%%i
+          if "%PLATFORM%"=="Win32" (set VCARCH=x86) else (set VCARCH=x64)
+          call "%VSPATH%\VC\Auxiliary\Build\vcvarsall.bat" %VCARCH% || exit /b 1
+          cd deps\Detours\src || exit /b 1
+          nmake || exit /b 1
+
+      - name: Collect libraries
+        shell: pwsh
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          foreach ($src in 'mactype', 'base') {
+            $lib = "$root\$src\lib"
+            New-Item -ItemType Directory -Force $lib | Out-Null
+            if ($env:PLATFORM -eq 'Win32') {
+              Copy-Item "$root\out\freetype\Win32\freetype.lib"    "$lib\freetype.lib"
+              Copy-Item "$root\out\iniparser\Win32\IniParser.lib"  "$lib\iniparser.lib"
+              Copy-Item "$root\out\wow64ext\wow64ext.lib"          "$lib\wow64ext.lib"
+              Copy-Item "$root\deps\Detours\lib.X86\detours.lib"   "$lib\detours.lib"
+            } else {
+              Copy-Item "$root\out\freetype\x64\freetype.lib"      "$lib\freetype64.lib"
+              Copy-Item "$root\out\iniparser\x64\IniParser64.lib"  "$lib\iniparser64.lib"
+              Copy-Item "$root\deps\Detours\lib.X64\detours.lib"   "$lib\detours64.lib"
+            }
+          }
+
+      # ---------- MacType 本体（base と head）。macloader は要らないので MacType だけ ----------
+      - name: Build MacType (head and base)
+        shell: pwsh
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          $env:FREETYPE_PATH   = "$root\deps\freetype"
+          $env:INI_PARSER_PATH = "$root\deps\IniParser"
+          foreach ($src in 'mactype', 'base') {
+            Write-Host "==== $src"
+            msbuild $src\gdipp.sln /t:MacType /m /nologo /v:m "/p:Configuration=Rel+Detours" /p:Platform=$env:PLATFORM
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          $name = if ($env:PLATFORM -eq 'Win32') { 'Rel+Detours\MacType.Core.dll' } else { 'x64\Rel+Detours\MacType64.Core.dll' }
+          "HEAD_DLL=$root\mactype\$name" | Add-Content $env:GITHUB_ENV
+          "BASE_DLL=$root\base\$name"    | Add-Content $env:GITHUB_ENV
+          Get-FileHash "$root\mactype\$name", "$root\base\$name" | Format-Table -AutoSize
+
+      # ---------- テスト用 EXE ----------
+      - name: Build t01.exe
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set VSPATH=%%i
+          if "%PLATFORM%"=="Win32" (set VCARCH=x86) else (set VCARCH=x64)
+          call "%VSPATH%\VC\Auxiliary\Build\vcvarsall.bat" %VCARCH% || exit /b 1
+          mkdir out\t01 2>nul
+          cl /nologo /utf-8 /std:c++17 /O2 /EHsc /MT /W4 /DUNICODE /D_UNICODE mactype\tools\t01\t01.cpp ^
+            /Fo:out\t01\ /Fe:out\t01\t01.exe /link gdi32.lib user32.lib advapi32.lib || exit /b 1
+
+      # ---------- 日本語フォントの確認 ----------
+      # ランナーに日本語フォントがなければ（または手動実行で指定したら）、SIL OFL 1.1 の M PLUS 1p を
+      # 固定のコミットから取り、SHA-256 を確かめてから AddFontResourceEx(FR_PRIVATE) で読ませる。
+      - name: Check Japanese fonts
+        shell: pwsh
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          & "$root\out\t01\t01.exe" --list-fonts
+          $code = $LASTEXITCODE
+          $force = '${{ github.event.inputs.force_font_fallback }}' -eq 'true'
+          if ($code -eq 0 -and -not $force) { Write-Host "Japanese fonts are available"; exit 0 }
+          if ($code -ne 0 -and $code -ne 2) { exit 1 }
+          Write-Host "Using downloaded font (M PLUS 1p, SIL OFL 1.1)"
+          $commit = '7af0d90b4d532ffa4b041937b560c6df4e7b1e95'   # google/fonts
+          $files = [ordered]@{
+            'MPLUS1p-Regular.ttf' = '2f294ad496432b1608f070d310e3aa2adcf1de4af429f4901df97ec4bd361ed1'
+            'MPLUS1p-Bold.ttf'    = '76eb077b0a31ca33ca40238e47da5a17e2786741607cec09678d7d2e5ab1afc1'
+            'OFL.txt'             = 'da15da6b1496d4de18f97e2ad1b722ef8a1c121149c2c93b2cf7eac6ac27b35c'
+          }
+          $dir = "$root\out\fonts"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          $fontArgs = @()
+          foreach ($f in $files.Keys) {
+            Invoke-WebRequest "https://raw.githubusercontent.com/google/fonts/$commit/ofl/mplus1p/$f" -OutFile "$dir\$f"
+            $h = (Get-FileHash -Algorithm SHA256 "$dir\$f").Hash.ToLower()
+            if ($h -ne $files[$f]) { Write-Host "::error::sha256 mismatch: $f $h"; exit 1 }
+            if ($f -like '*.ttf') { $fontArgs += '--add-font', "$dir\$f" }
+          }
+          $fontArgs += '--jp-face', 'M PLUS 1p'
+          & "$root\out\t01\t01.exe" --list-fonts @fontArgs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          "T01_FONT_ARGS=$($fontArgs -join '|')" | Add-Content $env:GITHUB_ENV
+
+      # ---------- 実行と比較 ----------
+      - name: Run T-01
+        shell: pwsh
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          $fontArgs = if ($env:T01_FONT_ARGS) { $env:T01_FONT_ARGS.Split('|') } else { @() }
+          & "$root\mactype\tools\t01\run-t01.ps1" -Tool "$root\out\t01\t01.exe" `
+            -BaseDll $env:BASE_DLL -HeadDll $env:HEAD_DLL -OutDir "$root\out\result" -FontArgs $fontArgs
+          exit $LASTEXITCODE
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: T01-${{ matrix.platform }}-${{ github.sha }}
+          path: |
+            out/result/
+            out/t01/t01.exe
+          if-no-files-found: warn
