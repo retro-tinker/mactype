@@ -6,12 +6,14 @@
 #    MacType 本体は DLL と同じフォルダの MacType.ini を読み（settings.cpp の LoadSettings）、
 #    AlternativeFile があればそちらを読み直す（LoadAppSettings）。実際の配置と同じ読み方になる。
 # 2. 単スレッド（--repeat）と複数スレッド（--threads）で、それぞれ別のプロセスとして動かす。
+#    複数スレッドは、base と head を交互に MtRuns 回ずつ動かす。スレッドの開始時にだけ起きる競合（S-03 など）は、
+#    1 回のプロセスにつき 1 度しか機会がないので、プロセスを立ち上げる回数で稼ぐ。
 # 3. 比べる:
 #    - base と head の単スレッドのハッシュが、全ケースで同じ        → 違えば失敗
-#    - head の複数スレッドのハッシュが、head の単スレッドと同じ      → 違えば失敗
-#    - 複数スレッドで落ちた・ずれた場合: base でも同じく失敗していれば「改造前からある問題」として警告にとどめる。
-#      base は通って head だけ失敗したら、改造で悪くなったので失敗（S-01 などを直した後は、head が通るはず）
-# 4. 速度: base と head を交互に数回動かし、中央値を出す（参考値）。
+#    - head の複数スレッドが 1 回でも「落ちる・固まる・スレッド間でずれる・単スレッドとずれる」→ 失敗
+#      base がどうだったかには関係なく失敗にする（S-01 と S-03 を直した後は、base も head も通るはず）
+#    - base の複数スレッドだけが失敗 → 警告（比較先のブランチ側の問題。それを直すブランチを失敗にしないため）
+# 4. 速度: base と head を交互に数回動かし、中央値を出す（参考値）。複数スレッドの時間も、MtRuns 回の中央値を出す。
 #
 # 例: pwsh tools/t01/run-t01.ps1 -Tool t01.exe -BaseDll base\MacType64.Core.dll -HeadDll head\MacType64.Core.dll -OutDir out
 param(
@@ -23,6 +25,7 @@ param(
     [int] $Repeat = 5,
     [int] $Threads = 8,
     [int] $Rounds = 3,
+    [int] $MtRuns = 5,
     [int] $SpeedRuns = 3,
     [int] $SpeedRepeat = 20,
     [int] $TimeoutSec = 600,
@@ -111,22 +114,44 @@ function CompareHashes([string] $what, $a, $b, [string] $la, [string] $lb) {
 
 $dlls = [ordered]@{ base = (Prepare 'base' $BaseDll); head = (Prepare 'head' $HeadDll) }
 
-# ---- 単スレッド・複数スレッド
-$st = @{}; $mt = @{}; $mtFail = @{}
+# ---- 単スレッド
+$st = @{}
 foreach ($label in $dlls.Keys) {
-    $dll = $dlls[$label]
     $tsv = Join-Path $OutDir "$label-st.tsv"
-    $code = RunTool "$label-st" (@('--dll', $dll, '--out', $tsv, '--repeat', "$Repeat") + $FontArgs)
+    $code = RunTool "$label-st" (@('--dll', $dlls[$label], '--out', $tsv, '--repeat', "$Repeat") + $FontArgs)
     if ($code -ne 0) { Bad ("{0}: single-thread run failed (exit 0x{1:x8}). See {0}-st.log" -f $label, $code) }
     elseif (Test-Path $tsv) { $st[$label] = ReadHashes $tsv }
+}
 
-    $tsv = Join-Path $OutDir "$label-mt.tsv"
-    $code = RunTool "$label-mt" (@('--dll', $dll, '--out', $tsv, '--threads', "$Threads", '--rounds', "$Rounds") + $FontArgs)
-    if ($code -ne 0) {
-        $mtFail[$label] = ("{0}: multi-thread run failed (exit 0x{1:x8}). See {0}-mt.log" -f $label, $code)
-        Get-Content (Join-Path $OutDir "$label-mt.log") | Where-Object { $_ -match '^(CRASH|  )' } |
-            Select-Object -First 24 | ForEach-Object { $summary.Add("    $_") }
-    } elseif (Test-Path $tsv) { $mt[$label] = ReadHashes $tsv }
+# ---- 複数スレッド（base と head を交互に、MtRuns 回ずつ）
+$mtOk = @{ base = 0; head = 0 }
+$mtBad = @{ base = @(); head = @() }      # 失敗した回の説明
+$mtMs = @{ base = @(); head = @() }
+for ($i = 1; $i -le $MtRuns; $i++) {
+    foreach ($label in $dlls.Keys) {
+        $name = "$label-mt-$i"
+        $tsv = Join-Path $OutDir "$name.tsv"
+        $code = RunTool $name (@('--dll', $dlls[$label], '--out', $tsv, '--threads', "$Threads", '--rounds', "$Rounds") + $FontArgs)
+        $why = $null
+        if ($code -eq -1) { $why = "no exit within $TimeoutSec s (hang?)" }
+        elseif ($code -eq 1) { $why = 'check failed, for example threads or rounds disagree (exit 1)' }
+        elseif ($code -ne 0) { $why = ('crashed (exit 0x{0:x8})' -f $code) }
+        elseif (-not (Test-Path $tsv)) { $why = 'no output' }
+        elseif ($st.ContainsKey($label)) {
+            $d = CompareHashes 'mt' $st[$label] (ReadHashes $tsv) 'single' 'multi'
+            if ($d.Count) { $why = "differs from single-thread in $($d.Count) cases: " + (($d | Select-Object -First 3) -join '; ') }
+        }
+        if ($why) {
+            $mtBad[$label] += "run ${i}: $why. See $name.log"
+            # 落ちた場所を要約にも残す
+            $crash = @(Get-Content (Join-Path $OutDir "$name.log") | Where-Object { $_ -match '^(CRASH|  |# heap corruption)' } | Select-Object -First 24)
+            $crash | ForEach-Object { $mtBad[$label] += "    $_" }
+        } else {
+            $mtOk[$label]++
+            $line = Get-Content (Join-Path $OutDir "$name.log") | Where-Object { $_ -match '^# TIME mt_ms=' } | Select-Object -First 1
+            if ($line -match 'mt_ms=([\d.]+)') { $mtMs[$label] += [double]$Matches[1] }
+        }
+    }
 }
 
 # ---- 比べる
@@ -140,22 +165,16 @@ if ($st.ContainsKey('base') -and $st.ContainsKey('head')) {
     }
 }
 foreach ($label in 'base', 'head') {
-    if ($st.ContainsKey($label) -and $mt.ContainsKey($label)) {
-        $d = CompareHashes 'mt' $st[$label] $mt[$label] 'single' 'multi'
-        if ($d.Count) {
-            $mtFail[$label] = "${label}: multi-thread result differs from single-thread in $($d.Count) cases"
-            $d | Select-Object -First 10 | ForEach-Object { $summary.Add("  - $_") }
-        } else {
-            Note "${label}: multi-thread ($Threads threads x $Rounds rounds) matches single-thread"
-        }
-    }
-}
-if ($mtFail.ContainsKey('base')) { Warn "$($mtFail['base'])  (pre-change code)" }
-if ($mtFail.ContainsKey('head')) {
-    if ($mtFail.ContainsKey('base')) {
-        Warn "$($mtFail['head'])  (base fails too: pre-existing problem, not caused by this change)"
+    $what = "${label}: multi-thread ($Threads threads x $Rounds rounds): $($mtOk[$label]) of $MtRuns runs OK"
+    if ($mtOk[$label] -eq $MtRuns) {
+        Note "$what (no crash, all threads agree, same pixels as single-thread)"
+    } elseif ($label -eq 'head') {
+        # head が 1 回でも失敗したら、base に関係なく失敗
+        Bad $what
+        $mtBad[$label] | ForEach-Object { $s = if ($_ -match '^run ') { "  - $_" } else { "      $_" }; $summary.Add($s); Write-Host $s }
     } else {
-        Bad "$($mtFail['head'])  (base passed: this change made it worse)"
+        Warn "$what  (base = the branch compared against. Not caused by this change)"
+        $mtBad[$label] | ForEach-Object { $s = if ($_ -match '^run ') { "  - $_" } else { "      $_" }; $summary.Add($s); Write-Host $s }
     }
 }
 foreach ($label in 'base', 'head') {
@@ -190,6 +209,13 @@ if ($times['base'].Count -and $times['head'].Count) {
     Note "|---|---:|---:|---:|"
     Note ("| pass 1, cold cache (ms) | {0:N1} | {1:N1} | {2:N3} |" -f $bc, $hc, ($hc / $bc))
     Note ("| pass 2+, warm, per pass (ms) | {0:N2} | {1:N2} | {2:N3} |" -f $bw, $hw, ($hw / $bw))
+}
+if ($mtMs['base'].Count -and $mtMs['head'].Count) {
+    $bm = Median $mtMs['base']; $hm = Median $mtMs['head']
+    Note ""
+    Note "| multi-thread, $Threads threads x $Rounds rounds (median of the runs that passed) | base ($($mtMs['base'].Count) runs) | head ($($mtMs['head'].Count) runs) | head/base |"
+    Note "|---|---:|---:|---:|"
+    Note ("| whole run (ms) | {0:N1} | {1:N1} | {2:N3} |" -f $bm, $hm, ($hm / $bm))
 }
 
 Note ""
