@@ -282,6 +282,9 @@ void FreeTypeFontCache::AddCharData(WCHAR wch, UINT glyphindex, int width, int g
 	if (glyphindex & 0xffff0000 /*|| !g_ccbCache*/) {
 		return;
 	}
+	// S-01: add / replace / compact under CS_FONTCACHE, the lock the lookup side holds (ft.cpp).
+	// Nothing below takes another lock.
+	CCriticalSectionLock __lock(CCriticalSectionLock::CS_FONTCACHE);
 	if (AddIncrement() >= FREETYPE_REQCOUNTMAX) {	//先压缩，避免压缩后丢失的问题
 		Compact();
 	}
@@ -326,6 +329,9 @@ void FreeTypeFontCache::AddGlyphData(UINT glyphindex, int width, int gdiWidth, F
 	if (glyphindex & 0xffff0000 /*|| !g_ccbCache*/) {
 		return;
 	}
+	// S-01: add / replace / compact under CS_FONTCACHE, the lock the lookup side holds (ft.cpp).
+	// Nothing below takes another lock.
+	CCriticalSectionLock __lock(CCriticalSectionLock::CS_FONTCACHE);
 	//GC
 	if (AddIncrement() >= FREETYPE_REQCOUNTMAX) {
 		//TRACE(_T("Compact(0x%p)\n"), this);

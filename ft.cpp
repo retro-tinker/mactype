@@ -1859,6 +1859,11 @@ BOOL ForEachGetGlyphFT(FreeTypeDrawInfo& FTInfo, LPCTSTR lpString, int cbString,
 		BOOL bIsBold = false, bIsIndivBold = false;
 
 		{
+			// S-01: hold CS_FONTCACHE from the cache lookup until the glyph is ref-copied, so that AddCharData /
+			// AddGlyphData (replace) and Compact (delete) on another thread cannot free it in between.
+			// CS_LIBRARY is taken first to keep the existing order CS_LIBRARY -> CS_FONTCACHE (ReloadAll).
+			CCriticalSectionLock __lock(CCriticalSectionLock::CS_LIBRARY);
+			CCriticalSectionLock __lockCache(CCriticalSectionLock::CS_FONTCACHE);
 
 			chData = bGlyphIndex
 				? pftCache->FindGlyphIndex(wch)
@@ -1868,7 +1873,6 @@ BOOL ForEachGetGlyphFT(FreeTypeDrawInfo& FTInfo, LPCTSTR lpString, int cbString,
 
 				gdi32x = chData->GetGDIWidth();
 				*AAList = chData->GetAAMode();
-				CCriticalSectionLock __lock(CCriticalSectionLock::CS_LIBRARY);
 				FT_Glyph_Ref_Copy((FT_Referenced_Glyph)chData->GetGlyph(render_mode), glyph_bitmap);	// cached img-> glyph_bitmap
 				//TRACE(_T("Cache Hit: %wc, size:%d, 0x%8.8X\n"), wch, chData->GetWidth(), glyph_bitmap);
 			}
@@ -2399,6 +2403,11 @@ BOOL ForEachGetGlyphGGO(FreeTypeDrawInfo& FTInfo, LPCTSTR lpString, int cbString
 		BOOL bIsBold = false, bIsIndivBold = false;
 
 		{
+			// S-01: hold CS_FONTCACHE from the cache lookup until the glyph is ref-copied, so that AddCharData /
+			// AddGlyphData (replace) and Compact (delete) on another thread cannot free it in between.
+			// CS_LIBRARY is taken first to keep the existing order CS_LIBRARY -> CS_FONTCACHE (ReloadAll).
+			CCriticalSectionLock __lock(CCriticalSectionLock::CS_LIBRARY);
+			CCriticalSectionLock __lockCache(CCriticalSectionLock::CS_FONTCACHE);
 
 			chData = bGlyphIndex
 				? pftCache->FindGlyphIndex(wch)
@@ -2414,7 +2423,6 @@ BOOL ForEachGetGlyphGGO(FreeTypeDrawInfo& FTInfo, LPCTSTR lpString, int cbString
 				}*/
 				gdi32x = chData->GetGDIWidth();
 				*AAList = chData->GetAAMode();
-				CCriticalSectionLock __lock(CCriticalSectionLock::CS_LIBRARY);
 				FT_Glyph_Ref_Copy((FT_Referenced_Glyph)chData->GetGlyph(render_mode), glyph_bitmap);
 				//TRACE(_T("Cache Hit: %wc, size:%d, 0x%8.8X\n"), wch, chData->GetWidth(), glyph_bitmap);
 			}
