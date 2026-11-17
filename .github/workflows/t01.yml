@@ -1,6 +1,8 @@
 # T-01: 描画結果の機械的な比較（docs/kaizo-plan.md 4 章 段階 0）
 # 改造前（base、既定は directwrite ブランチ）と改造後（このコミット）の Core DLL を同じ手順・同じ依存ライブラリで
 # ビルドし、同じランナー上で tools/t01/t01.exe を動かして画素のハッシュを比べる。違えばジョブを失敗させる。
+# 複数スレッドのモードは、base と head を交互に 5 回ずつ動かす。head が 1 回でも失敗（落ちる・固まる・画素がずれる）
+# したら、base の結果に関係なくジョブを失敗させる。base だけが失敗したときは警告（tools/t01/run-t01.ps1）。
 # ログと結果（*.tsv、*.log、summary.md、使った DLL）は Artifacts（T01-<構成>-<SHA>）に残す。
 
 name: T-01 render check

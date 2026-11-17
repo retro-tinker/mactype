@@ -221,6 +221,18 @@ static LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep)
 	return EXCEPTION_EXECUTE_HANDLER;
 }
 
+// ヒープ破壊（0xC0000374）は、SetUnhandledExceptionFilter の関数を通らずにプロセスが終わる。
+// ベクター例外ハンドラで先に拾って、検出した場所の呼び出し履歴を出す。
+// 出るのは「壊れているのに気づいた場所」で、「壊した場所」とは限らない
+static LONG WINAPI HeapCorruptionVeh(EXCEPTION_POINTERS* ep)
+{
+	if (ep->ExceptionRecord->ExceptionCode == 0xC0000374) {
+		printf("# heap corruption detected (the stack below is where it was noticed, not always where it was caused)\n");
+		return CrashFilter(ep);
+	}
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+
 // ---------------------------------------------------------------- フォントの有無
 
 static int CALLBACK EnumFaceProc(const LOGFONTW*, const TEXTMETRICW*, DWORD, LPARAM lp)
@@ -647,6 +659,7 @@ int wmain(int argc, wchar_t** argv)
 {
 	SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
 	SetUnhandledExceptionFilter(CrashFilter);
+	AddVectoredExceptionHandler(1, HeapCorruptionVeh);
 
 	std::wstring dllPath, outPath;
 	std::vector<std::wstring> addFonts, extraJP;
