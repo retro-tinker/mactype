@@ -224,7 +224,7 @@ DirectWrite / Direct2D 側は自前で描いていない。レンダリングパ
 - フォント削除: `OCS_DC(2)` → `CS_MANAGER` → 次のどれか
   - `CS_FONTMAP` → `CS_FONTCACHE`（`fteng.cpp:495, 521` → `fteng.h:433, 517`）、`CS_FONTMAP` → `CS_CACHEDFONT`（`fteng.h:434` → `override.cpp:766`）
   - `CS_FONTENG`（`fteng.cpp:566`）
-  - `CS_TLSDATA` → `CS_CACHEDFONT`（S-03 で足した。`fteng.cpp:583` で `TLSDCArray` を走査する間、`CS_TLSDATA` を持つ。その中で呼ぶ `~CBitmapCache` が `DeleteObject`（フック済み）を呼び、`CS_CACHEDFONT` を取る。`DeleteDC` のフックは設置されていないので、`CS_DCRELATION` は取らない）
+  - `CS_TLSDATA` → `CS_CACHEDFONT`（S-03 で足した。`fteng.cpp:583` で `TLSDCArray` を走査する間、`CS_TLSDATA` を持つ。その中で呼ぶ `~CBitmapCache` が `DeleteObject`（フック済み）を呼び、`CS_CACHEDFONT` を取る。`DeleteDC` のフックは設置されていないので、`CS_DCRELATION` は取らない。この走査の経路は、T-01 では一度も通っていない。コードを読んだだけ。2.2 の S-03 のレビュー）
 - スレッドの最初の描画（S-03 で足した）: ほかのロックを持たずに `CS_TLSDATA`（`override.cpp:1134` → `override.h:74`、`tlsdata.h:31`）。中では配列・集合の操作だけ
 - スレッドの終了（S-03 で足した）: ローダーロック → `CS_TLSDATA`（`DLL_THREAD_DETACH` → `tlsdata.h:78`、`override.h:80`）。中では配列・集合の操作だけ。`CS_TLSDATA` を持ったままローダーロックを待つ経路はない
 - 設定反映: `OCS_FREETYPE(2)` → `CS_LIBRARY` →（`CS_SETTING`／`CS_FONTCACHE`）（`fteng.h:622-624, 640`）
@@ -406,7 +406,7 @@ DirectWrite / Direct2D 側は自前で描いていない。レンダリングパ
   - ロックの取得順（1.6 に書き足した。コードを読んで確認済み）:
     - 足す側を呼ぶのは `IMPL_ExtTextOutW` の入口（`override.cpp:1134`）だけで、ほかのロックを持っていない（`ft.cpp` にもう 1 か所あるが、コメントの中）。
     - 外す側は、ローダーロック → `CS_TLSDATA`。`CS_TLSDATA` の中では、配列・集合の操作しかしない。
-    - 走査は、`OCS_DC(2)` → `CS_MANAGER` → `CS_TLSDATA` → `CS_CACHEDFONT`（`~CBitmapCache` の中の `DeleteObject` フック）。`CS_TLSDATA` を取る場所は、どれも `CS_CACHEDFONT` を持っていないので、逆順の組はない。走査の中で呼ぶ GDI は、メモリ DC・DIB・ブラシの削除で、ローダーロックを取るものではない（ここは推測。確かめてはいない）。
+    - 走査は、`OCS_DC(2)` → `CS_MANAGER` → `CS_TLSDATA` → `CS_CACHEDFONT`（`~CBitmapCache` の中の `DeleteObject` フック）。`CS_TLSDATA` を取る場所は、どれも `CS_CACHEDFONT` を持っていないので、逆順の組はない。走査の中で呼ぶ GDI は、メモリ DC・DIB・ブラシの削除で、ローダーロックを取るものではない（ここは推測。確かめてはいない。コードで確かめられたのは、メモリ DC の元が画面の DC に限られること = プリンタドライバの DLL が絡まないことまで。下のレビュー）。
     - コミットメッセージには「`DeleteDC` のフックが `CS_DCRELATION` を取る」とも書いたが、`DeleteDC` のフックは設置されていない（`hook_demand_DeleteDC` を呼ぶ場所がない）。今できる組は `CS_TLSDATA` → `CS_CACHEDFONT` だけ。
   - ビルド（確認済み）: `Build MacType` 成功（run 44029549476。Win32 / x64）。
   - 単スレッドの画素（確認済み）: `T-01 render check` 成功（run 44029549453）。553 ケースすべてで base（`db4c8af`）と head のハッシュが同じ。Win32 / x64 とも。
@@ -428,6 +428,13 @@ DirectWrite / Direct2D 側は自前で描いていない。レンダリングパ
     - E（開始と終了を重ねる）について: base が落ちた 4 回は、どれも開始から 6〜8 秒（最初の描画が重なるところ）で、短命のスレッドを回している間に落ちた回はなかった。だから「開始と終了の重なり」では、「base は落ちる」を示せていない。示せたのは、head が、短命のスレッドを合計 15,600 本（36 回 × 400 本と、ページヒープで 6 回 × 200 本）回しても、落ちない・固まらない・画素がずれないこと（外す側はローダーロックの中で `CS_TLSDATA` を取るので、デッドロックしないことの確認になる）。
     - push で走る T-01（8 スレッド × 3 ラウンドを 1 回）でも、head は通った: `fix/s03-tls-array-lock`（run 44029549453）と `test/s01-stress`（run 44029744667）の、Win32 / x64 の計 4 回。
   - 速度（参考値）: 単スレッド（run 44029549453、中央値）の head / base は、2 周目以降が Win32 1.004、x64 0.994。1 周目が Win32 0.990、x64 1.007。複数スレッド（条件 A の、通った回の平均）は、Win32 が base 17,569 ミリ秒 / head 17,513 ミリ秒、x64 が 14,188 / 14,220。どれも差は見えない（ロックを取るのは、スレッドの最初の描画と終了のときだけ）。
+  - レビュー（`docs/s03-review.md`。別セッションの Opus。コードを読んだだけで、何も走らせていない。結論は「マージしてよい」）への対応。コードは変えていない。
+    - デッドロック（ローダーロックと `CS_TLSDATA`）: MacType のロックの範囲では、循環を作れない（確認済み）。`CS_TLSDATA` を持ったままローダーロックを待ちうるのは `RemoveFont` の走査だけで、呼ぶ側（`IMPL_RemoveFontResourceExW`、`override.cpp:843`）は MacType のロックを持たずに入る。走査の中の `DeleteObject` フックが取る `CS_CACHEDFONT` の中は、`map` とヒープの操作だけ。アプリが自分の `DllMain` から `RemoveFontResourceEx` を呼んだ場合も、終わりかけのスレッドはローダーロックを取れず `CS_TLSDATA` まで来ないので、循環にならない。
+    - 残る推測: gdi32 の `DeleteDC` / `DeleteObject` の中が、ローダーロックを取らないこと。消すのは、画面の DC と互換のメモリ DC（`IsValidDC`、`override.cpp:1284` を通ってから `override.cpp:1322` で作る）、DIB、単色ブラシ。ほかのソフトの DLL がこれらの API をフックしている環境のことは、読んでもわからない。
+    - 取得順の逆転: なし（確認済み）。1.6 の記述と合っている。
+    - 守り漏れ（`ProcessTerm` が `pArray` をロックなしで走査して `delete` する）: 納得。S-03 の範囲外。S-14 に書き足した。
+    - コミット `9c79202` のメッセージの誤り（`DeleteDC` のフック）: 上の「ロックの取得順」で訂正済み。コミットは書き換えない。
+    - テストの穴（**残っている**）: T-01 は `RemoveFontResourceEx` を呼ばないので、402 回の結果は足す側・外す側の確認で、`RemoveFont` の走査（この修正でいちばん長く `CS_TLSDATA` を持つ場所）は、Windows 上で一度も通っていない。レビューの提案（フォントの追加 → そのフォントで描く → 削除を、短命のスレッドと重ねて繰り返すモード）は、T-03 として 4 章に足した（提案）。S-03 のマージの条件にはしていない（走査に入るのは、アプリが使用済みのフォントを `RemoveFontResourceEx` で外したときだけ。この間 `CS_TLSDATA` で待たされるのは、最初の描画と終了のスレッドだけ）。
   - この修正で直していないもの・確かめていないもの:
     - DLL の動的アンロード（`ProcessTerm`、`tlsdata.h`）が一覧を走査して `delete` するところ。アンロードと描画が重なる問題は、ここだけでは直らないので、触っていない。
     - `RemoveFont` の走査は、T-01 では通らない（`RemoveFontResourceEx` を呼ばない）。ロックを足したが、コードを読んだだけ。ほかのスレッドの `CBitmapCache` のデストラクタを直接呼ぶこと自体（S-17）も、そのまま。
@@ -508,6 +515,7 @@ Windows 11 の Segoe UI Variable など、名前つきインスタンスを持�
 
 - 確認済み: `hook_term` はフックを外した後、フック内にいるスレッド数が 0 になるのを最大 3000 回（1 回 1ms 以上のスリープ）待つ（`hook.cpp:146`、`hookCounter.h:18-23`）。これは `DllMain`（ローダーロック中）で行われる。待ち切れなくても、そのままエンジンや設定、ロックを破棄する（`hook.cpp:656-677`）。
 - 推測: フック内でローダーロックを待っているスレッドがいると、待ちは必ずタイムアウトし、その後そのスレッドが解放済みの資源に触れて落ちる。
+- 確認済み（S-03 のレビューで足した）: アンロードのときの `g_TLInfo.ProcessTerm()`（`hook.cpp:675` → `tlsdata.h:60-66`、S-03 の後の行）は、TLS 一覧（`pArray`）をロックなしで走査して `delete` する。S-03 が足した `CS_TLSDATA` は、ここを囲んでいない。まだフックの中にいるスレッドが最初の描画をすると、一覧への追加と重なる。囲んでも、すぐ後でロックそのものを破棄する（`hook.cpp:676`）ので、ここだけでは直らない。
 - 直し方の方向: 根本的には「アンロードしない」しかない。ローダー側の仕様が絡むので、後回し。
 
 #### S-15 / S-16 `FT_Face` の扱い
@@ -521,6 +529,7 @@ Windows 11 の Segoe UI Variable など、名前つきインスタンスを持�
 
 - 確認済み: アプリが `RemoveFontResourceEx` を呼ぶたびに、(1) フォントファイルの中の書体名を調べ、情報が取れなければ `AddFontResourceW` で一度登録してから調べて外す（`fteng.cpp:59-99`）、(2) `OCS_DC(2)` で全描画を止める（`fteng.cpp:550`）、(3) 使用済みのフォントなら、全スレッドの作業用ビットマップ `CBitmapCache` のデストラクタを直接呼ぶ（`fteng.cpp:575-580`。オブジェクト自体は残り、後でもう一度デストラクタが走る）。
 - 推測: 埋め込みフォントを頻繁に出し入れするアプリで、重さや不安定さの原因になる。
+- S-03 の後の状態（2026-11-17）: (3) の走査は、`CS_TLSDATA` を持って行う（`fteng.cpp:583`、S-03 の後の行）。走査の間、最初の描画をするスレッドと終わるスレッド（ローダーロックの中）が待つ。この経路は T-01 で通っていない（S-03 のレビュー。T-03）。ここを触るときは、先に T-03 を用意する。
 
 #### S-18 NULL・失敗チェック漏れ（それぞれ別ブランチ）
 
@@ -805,6 +814,7 @@ Windows 11 の Segoe UI Variable など、名前つきインスタンスを持�
     - 速度: 描画部分（`ExtTextOutW` と `GdiFlush`）だけを足した時間を、base / head 交互に 3 回ずつ測って中央値を出す。同じソースどうしでも ±6% ほど揺れたので、それより小さい差は判断に使えない。
     - T-01 で確かめられないこと（変わらず）: DirectWrite / Direct2D の描画結果（S-09、S-23、P-11、P-19）、GDI の `ExtTextOutW` 以外の入口（`TextOutW`、`ExtTextOutA`、`DrawText` 経由など。後者は内部で `ExtTextOutW` を通ると思われるが未確認）、設定の再読み込み（S-11、S-20、S-22）、フォント削除（S-17）、`Default.ini` の `[Individual]` が効く経路（ランナーに MS Mincho などがない）、FontSubstitutes を使う経路、けんじさんの PC との差（DPI、フォントの版、ClearType 設定、日本語版 Windows の SystemLink）、実際のアプリでの動き。
 - **T-02（提案）**: 実機での試し方を、1 回決める。けんじさんは公式版を普段使いしていて、改造した DLL はまだ試していない。決めること: (1) 普段使いの公式版を壊さずに、改造版をどう当てるか、(2) どのアプリで見るか、(3) 元に戻す手順。Core だけ差し替えて動くかは未確認（7 章）。段階 1 の最初の 1 本（P-01）のビルドができた時点で、一緒に試して固めるのがよい。
+- **T-03（提案。S-03 のレビューから）**: T-01 に、フォント削除の経路を通すモードを足す。別のスレッドで「テスト用フォントを `AddFontResourceEx(FR_PRIVATE)` → そのフォントで描く → `RemoveFontResourceEx`」を繰り返し、同時に短命のスレッドを次々に作る（S-03 の確認で使った条件 E）。消す前にそのフォントで描かないと、`RemoveFont` の走査（`bIsFontFileLoaded` が真のとき）に入らない。見るもの: 固まらないこと（ローダーロックと `CS_TLSDATA`）、落ちないこと。S-03 の走査の確認と、S-17、S-20、S-02 の前後の確認に使える。注意（推測）: この経路には S-17、S-20、S-02 の問題も重なっているので、base が落ちる・固まる可能性がある。いつやるかは、決めていない（S-17 / S-20 を触る前には要る）。
 
 **段階 1: 最初の 1 本、グリフキャッシュの排他、そのあと小さい修正**
 
