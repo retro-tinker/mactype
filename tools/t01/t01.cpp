@@ -221,6 +221,14 @@ static LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep)
 	return EXCEPTION_EXECUTE_HANDLER;
 }
 
+// [stress 用・使い捨て] ヒープ破壊（0xC0000374）は SetUnhandledExceptionFilter を通らずにプロセスが終わるので、
+// ベクター例外ハンドラで先に拾って、検出した場所の呼び出し履歴を出す（壊した場所とは限らない）
+static LONG WINAPI HeapCorruptionVeh(EXCEPTION_POINTERS* ep)
+{
+	if (ep->ExceptionRecord->ExceptionCode == 0xC0000374) return CrashFilter(ep);
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+
 // ---------------------------------------------------------------- フォントの有無
 
 static int CALLBACK EnumFaceProc(const LOGFONTW*, const TEXTMETRICW*, DWORD, LPARAM lp)
@@ -647,11 +655,12 @@ int wmain(int argc, wchar_t** argv)
 {
 	SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
 	SetUnhandledExceptionFilter(CrashFilter);
+	AddVectoredExceptionHandler(1, HeapCorruptionVeh);
 
 	std::wstring dllPath, outPath;
 	std::vector<std::wstring> addFonts, extraJP;
 	int repeat = 1, threads = 0, rounds = 3;
-	bool listFonts = false, gdiCheck = true;
+	bool listFonts = false, gdiCheck = true, serialFirst = false;
 	for (int i = 1; i < argc; ++i) {
 		std::wstring a = argv[i];
 		auto next = [&]() -> std::wstring { if (i + 1 >= argc) { Usage(); exit(4); } return argv[++i]; };
@@ -664,6 +673,7 @@ int wmain(int argc, wchar_t** argv)
 		else if (a == L"--jp-face") extraJP.push_back(next());
 		else if (a == L"--list-fonts") listFonts = true;
 		else if (a == L"--no-gdi-check") gdiCheck = false;
+		else if (a == L"--serial-first-draw") serialFirst = true;
 		else { Usage(); return 4; }
 	}
 	if ((!listFonts && dllPath.empty()) || repeat < 1 || threads < 0 || rounds < 1) { Usage(); return 4; }
@@ -757,6 +767,12 @@ int wmain(int argc, wchar_t** argv)
 		return 3;
 	}
 	Info("LoadLibrary: %.2f ms", tl1 - tl0);
+	{
+		// [stress 用・使い捨て] ページヒープが効いているか（NtGlobalFlag の 0x02000000）
+		typedef ULONG(NTAPI* PFN_RtlGetNtGlobalFlags)(void);
+		auto p = (PFN_RtlGetNtGlobalFlags)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetNtGlobalFlags");
+		Info("NtGlobalFlag 0x%08lx, verifier.dll %s", p ? p() : 0UL, GetModuleHandleW(L"verifier.dll") ? "loaded" : "not loaded");
+	}
 
 	const bool etoPatched = memcmp(etoBefore, etoBody, sizeof(etoBefore)) != 0;
 	Info("ExtTextOutW %s: before %s after %s", etoPatched ? "patched" : "NOT patched",
@@ -808,8 +824,15 @@ int wmain(int argc, wchar_t** argv)
 		std::vector<std::vector<uint64_t>> hashes(cases.size(), std::vector<uint64_t>((size_t)threads * rounds));
 		std::vector<uint32_t> color0(cases.size());
 		Barrier bar(threads);
+		std::mutex firstDraw;
 		auto worker = [&](int t) {
 			CanvasSet cs;
+			if (serialFirst) {
+				// [stress 用・使い捨て] 各スレッドの最初の描画だけ 1 本ずつにする。MacType はスレッドの最初の描画で
+				// TLS データを作って共有の一覧に足す（S-03 の場所）。そこが重ならないようにして、S-01 だけを見る
+				std::lock_guard<std::mutex> g(firstDraw);
+				DrawCase(cases[0], *cs.Get(cases[0].w, cases[0].h));
+			}
 			for (int r = 0; r < rounds; ++r)
 				for (size_t i = 0; i < cases.size(); ++i) {
 					bar.Wait();
@@ -823,7 +846,8 @@ int wmain(int argc, wchar_t** argv)
 		for (int t = 0; t < threads; ++t) ths.emplace_back(worker, t);
 		for (auto& th : ths) th.join();
 		const double el = NowMs() - t0;
-		Info("multithread: %d threads x %d rounds x %u cases: %.1f ms", threads, rounds, (unsigned)cases.size(), el);
+		Info("multithread: %d threads x %d rounds x %u cases: %.1f ms%s", threads, rounds, (unsigned)cases.size(), el,
+			serialFirst ? " (first draw of each thread serialized)" : "");
 		Info("TIME mt_ms=%.1f threads=%d rounds=%d cases=%u", el, threads, rounds, (unsigned)cases.size());
 		int bad = 0;
 		for (size_t i = 0; i < cases.size(); ++i) {
