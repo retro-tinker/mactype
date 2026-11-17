@@ -9,6 +9,7 @@ retro-tinker/mactype（snowie2000/mactype のフォーク）で作業すると�
 - 基準ブランチは `directwrite`（upstream の `directwrite` に build.yml を足したもの）。
 - ここでビルドされるのは本体の `MacType.Core.dll` / `MacType64.Core.dll`（`gdipp.vcxproj`）と `macloader`（`run.cpp`）。ローダー（`MacType64.dll`）と Tuner は非公開で、ソースはない。
 - 調査結果と修正候補の一覧は `docs/kaizo-plan.md`。作業はこの文書の ID（S-01、P-01 など）を単位に進める。
+- 優先度は、けんじさんが使っている設定で通る経路を先にする。通る経路・通らない経路は `docs/kaizo-plan.md` の 1.7。
 
 ## 作業ルール
 
@@ -38,6 +39,7 @@ retro-tinker/mactype（snowie2000/mactype のフォーク）で作業すると�
 - **使われる構成は Detours 版。** `USE_DETOURS` が定義される。`hook.cpp` などの `#ifdef USE_DETOURS` の側を読む。EasyHook 側（`#else`）はビルドされない。
 - **フック関数の中から、フック対象の API をそのまま呼ばない。** Detours 版には再入防止がない。元の API を呼ぶときは `ORIG_xxx` を使う。
 - **Win32 と x64 で違う点がある。** Win32 は `/Zc:threadSafeInit-`（関数内 static の初期化がスレッド安全でない）。x64 は有効。両方で正しく動く書き方にする。
+- **対応 OS は Vista 以降。** SRW ロック、`InitOnceExecuteOnce`、`LdrRegisterDllNotification` など、Vista 以降の API は使ってよい（けんじさんの決定、2026-11-17）。
 - **例外は `/EHsc`。** `catch(...)` はアクセス違反を捕まえない。フック関数から C++ 例外を外へ漏らさない。
 - **`DllMain` の中（ローダーロック中）に処理を足さない。** `LoadLibrary`、スレッド作成、待ち合わせは特に避ける。
 - **ロックを足すときは、取得順を `docs/kaizo-plan.md` の 1.6 と照らす。** 逆順の組を作らない。描画のたびに通る場所では、ロックの回数を増やさない工夫を先に考える。
