@@ -1,21 +1,26 @@
 #Requires -Version 7
-# S-01 の確認用（使い捨て。test/s01-stress ブランチだけに置く。directwrite にはマージしない）。
+# S-03 の確認用（使い捨て。test/s01-stress ブランチだけに置く。directwrite にはマージしない）。
 # run-t01.ps1 が作った置き場所（<OutDir>\dll-base、<OutDir>\dll-head）の DLL で、
-# t01.exe の複数スレッドのモードを、回数とラウンド数を増やして何度も回す。
+# t01.exe の複数スレッドのモードを何度も回す。条件はすべて「ふつう」（各スレッドの最初の描画も同時）。
+#   base = directwrite（S-01 まで入っている）、head = S-03 を直したコード
 #
-#   A: base と head を同じ条件で（8 スレッド × 3 ラウンド。ふつうの T-01 と同じ）
-#   B: A と同じだが、各スレッドの最初の描画だけ 1 本ずつにする（--serial-first-draw。S-03 の場所を重ねない）
-#   C: head だけ、B の条件でラウンド数とスレッド数を増やす
-#   D: 診断。ページヒープ（解放済みメモリに触った瞬間に止まる）を有効にして、落ちた場所の呼び出し履歴を出す
+#   A: ふつうの T-01 と同じ（8 スレッド × 3 ラウンド）
+#   S: プロセスを何度も立ち上げる（1 ラウンド。8 / 16 スレッド）。S-03 の競合はスレッドの開始時に起きるので、回数を稼ぐ
+#   E: スレッドの開始と終了を重ねる（--churn。短命のスレッドを次々に作る）
+#   C: head だけ、ラウンド数を増やす
+#   D: ページヒープ（解放済みメモリに触った瞬間に止まる）を有効にして回す
 #
 # これは数を数えるためのジョブなので、落ちても終了コードは 0 にする。1 回の実行ごとに 1 行、最後に集計の表を出す。
 param(
     [Parameter(Mandatory)] [string] $Tool,
     [Parameter(Mandatory)] [string] $OutDir,
-    [int] $SameRuns = 6,
+    [int] $SameRuns = 10,
+    [int] $StartRuns = 20,
+    [int] $ChurnRuns = 6,
+    [int] $Churn = 400,
     [int] $LongRounds = 20,
-    [int[]] $LongThreads = @(4, 8, 16),
-    [int] $PageHeapRuns = 4,
+    [int[]] $LongThreads = @(8, 16),
+    [int] $PageHeapRuns = 8,
     [int] $TimeoutSec = 1200
 )
 
@@ -83,6 +88,7 @@ function RunMt([string] $set, [string] $exe, [string] $label, [int] $threads, [i
     if ($set.StartsWith('D')) { $detail += $(if ($text -match 'NtGlobalFlag 0x[0-9a-f][2367abef][0-9a-f]{6}\b') { ' [page heap on]' } else { ' [page heap NOT on]' }) }
     $mtMs = ''
     if ($text -match 'TIME mt_ms=([\d.]+)') { $mtMs = $Matches[1] }
+    if ($text -match 'TIME churn_ms=([\d.]+)') { $detail += " churn_ms=$($Matches[1])" }
     Write-Host ("{0,-34} {1,-8} {2,7:N1} s  mt_ms={3,-9} {4}" -f $name, $outcome, $sec, $mtMs, $detail)
     if ($outcome -ne 'ok') {
         $text -split "`r?`n" | Where-Object { $_ -match '^(FAIL|CRASH|  access|  #\d\d )' } | Select-Object -First 16 |
@@ -91,24 +97,33 @@ function RunMt([string] $set, [string] $exe, [string] $label, [int] $threads, [i
     $rows.Add([pscustomobject]@{ set = $set; label = $label; threads = $threads; rounds = $rounds; outcome = $outcome })
 }
 
-Write-Host "==== A: same condition for base and head: 8 threads x 3 rounds, $SameRuns runs each (alternating)"
+# ---- S-03 の確認。条件はすべて「ふつう」（最初の描画も同時）。--serial-first-draw は使わない
+Write-Host "==== A: standard T-01 condition, 8 threads x 3 rounds, $SameRuns runs each (base / head alternating)"
 for ($i = 1; $i -le $SameRuns; $i++) {
     RunMt 'A' $Tool 'base' 8 3 $i @()
     RunMt 'A' $Tool 'head' 8 3 $i @()
 }
 
-Write-Host "==== B: same, but the first draw of each thread is serialized (S-03 site not overlapped)"
-for ($i = 1; $i -le $SameRuns; $i++) {
-    RunMt 'B' $Tool 'base' 8 3 $i @('--serial-first-draw')
-    RunMt 'B' $Tool 'head' 8 3 $i @('--serial-first-draw')
+Write-Host "==== S: many process starts (the S-03 race is at thread start), 1 round, $StartRuns runs each per thread count"
+foreach ($t in 8, 16) {
+    for ($i = 1; $i -le $StartRuns; $i++) {
+        RunMt 'S' $Tool 'base' $t 1 $i @()
+        RunMt 'S' $Tool 'head' $t 1 $i @()
+    }
 }
 
-Write-Host "==== C: head only, first draw serialized, longer runs ($LongRounds rounds)"
+Write-Host "==== E: thread churn (short-lived threads start and exit while others do the same), $ChurnRuns runs each"
+for ($i = 1; $i -le $ChurnRuns; $i++) {
+    RunMt 'E-churn' $Tool 'base' 8 1 $i @('--churn', "$Churn")
+    RunMt 'E-churn' $Tool 'head' 8 1 $i @('--churn', "$Churn")
+}
+
+Write-Host "==== C: head only, longer runs ($LongRounds rounds)"
 foreach ($t in $LongThreads) {
-    RunMt 'C' $Tool 'head' $t $LongRounds 1 @('--serial-first-draw')
+    RunMt 'C' $Tool 'head' $t $LongRounds 1 @()
 }
 
-Write-Host "==== D: diagnostics with full page heap (t01ph.exe), head, 8 threads x 1 round, $PageHeapRuns runs"
+Write-Host "==== D: full page heap (t01ph.exe), 8 threads x 1 round, head $PageHeapRuns runs, base $([int]($PageHeapRuns / 2)) runs, plus churn"
 $TimeoutSec = 600   # ページヒープは遅いので、1 回 10 分で打ち切る
 $ph = Join-Path (Split-Path -Parent $Tool) 't01ph.exe'
 Copy-Item -LiteralPath $Tool -Destination $ph -Force
@@ -119,9 +134,10 @@ foreach ($key in 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File E
 }
 for ($i = 1; $i -le $PageHeapRuns; $i++) {
     RunMt 'D-pageheap' $ph 'head' 8 1 $i @()
+    if ($i % 2 -eq 0) { RunMt 'D-pageheap' $ph 'base' 8 1 ([int]($i / 2)) @() }
 }
-RunMt 'D-pageheap-serial' $ph 'head' 8 1 1 @('--serial-first-draw')
-RunMt 'D-pageheap' $ph 'base' 8 1 1 @()
+RunMt 'D-pageheap-churn' $ph 'head' 8 1 1 @('--churn', '200')
+RunMt 'D-pageheap-churn' $ph 'base' 8 1 1 @('--churn', '200')
 
 # ---- 集計
 $summary = [System.Collections.Generic.List[string]]::new()

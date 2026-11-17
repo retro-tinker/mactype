@@ -28,6 +28,7 @@
 #include <condition_variable>
 #include <iterator>
 #include <mutex>
+#include <atomic>
 #include <string>
 #include <thread>
 #include <vector>
@@ -659,7 +660,7 @@ int wmain(int argc, wchar_t** argv)
 
 	std::wstring dllPath, outPath;
 	std::vector<std::wstring> addFonts, extraJP;
-	int repeat = 1, threads = 0, rounds = 3;
+	int repeat = 1, threads = 0, rounds = 3, churn = 0;
 	bool listFonts = false, gdiCheck = true, serialFirst = false;
 	for (int i = 1; i < argc; ++i) {
 		std::wstring a = argv[i];
@@ -674,6 +675,7 @@ int wmain(int argc, wchar_t** argv)
 		else if (a == L"--list-fonts") listFonts = true;
 		else if (a == L"--no-gdi-check") gdiCheck = false;
 		else if (a == L"--serial-first-draw") serialFirst = true;
+		else if (a == L"--churn") churn = _wtoi(next().c_str());
 		else { Usage(); return 4; }
 	}
 	if ((!listFonts && dllPath.empty()) || repeat < 1 || threads < 0 || rounds < 1) { Usage(); return 4; }
@@ -862,6 +864,38 @@ int wmain(int argc, wchar_t** argv)
 			}
 		}
 		if (bad) { Fail("%d cases differ between threads/rounds", bad); ++failures; }
+
+		if (churn > 0) {
+			// [stress 用・使い捨て] スレッドの開始と終了を重ねる。短命のスレッドを次々に作り、それぞれ 2 ケース描いて終わる。
+			// MacType は、スレッドの最初の描画で一覧に足し（ローダーロックの外）、スレッドの終了時に外す（ローダーロックの中）。
+			// threads 本の「作る係」が、短命スレッドを 1 本作っては終わるのを待つので、いつも threads 本くらいが動いている
+			std::atomic<int> nextId{0}, churnBad{0};
+			auto shortWorker = [&](int id) {
+				CanvasSet cs;
+				for (int k = 0; k < 2; ++k) {
+					const size_t c = ((size_t)id * 7 + (size_t)k * 131) % cases.size();
+					Result x = DrawCase(cases[c], *cs.Get(cases[c].w, cases[c].h));
+					if (x.hash != hashes[c][0]) ++churnBad;
+				}
+			};
+			auto spawner = [&]() {
+				for (;;) {
+					const int id = nextId.fetch_add(1);
+					if (id >= churn) break;
+					std::thread th(shortWorker, id);
+					th.join();
+				}
+			};
+			const double c0 = NowMs();
+			std::vector<std::thread> sp;
+			for (int t = 0; t < threads; ++t) sp.emplace_back(spawner);
+			for (auto& th : sp) th.join();
+			const double cel = NowMs() - c0;
+			Info("churn: %d short-lived threads (2 cases each), about %d alive at a time: %.1f ms, %d renders differ",
+				churn, threads, cel, churnBad.load());
+			Info("TIME churn_ms=%.1f churn=%d", cel, churn);
+			if (churnBad.load()) { Fail("%d churn renders differ from thread 0 round 1", churnBad.load()); ++failures; }
+		}
 	}
 
 	// ---- MacType が効いているか（素の GDI と違う画素になっているか）
