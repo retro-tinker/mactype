@@ -171,10 +171,10 @@ foreach ($label in 'base', 'head') {
     } elseif ($label -eq 'head') {
         # head が 1 回でも失敗したら、base に関係なく失敗
         Bad $what
-        $mtBad[$label] | ForEach-Object { $summary.Add("  - $_"); Write-Host "  - $_" }
+        $mtBad[$label] | ForEach-Object { $s = if ($_ -match '^run ') { "  - $_" } else { "      $_" }; $summary.Add($s); Write-Host $s }
     } else {
         Warn "$what  (base = the branch compared against. Not caused by this change)"
-        $mtBad[$label] | ForEach-Object { $summary.Add("  - $_"); Write-Host "  - $_" }
+        $mtBad[$label] | ForEach-Object { $s = if ($_ -match '^run ') { "  - $_" } else { "      $_" }; $summary.Add($s); Write-Host $s }
     }
 }
 foreach ($label in 'base', 'head') {
