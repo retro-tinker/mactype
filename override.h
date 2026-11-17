@@ -71,10 +71,13 @@ public:
 	CThreadLocalInfo()
 		: m_bInExtTextOut(false), m_bInUniscribe(false), m_bInPath(false), m_bInUniTextOut(false)
 	{
+		CCriticalSectionLock __lock(CCriticalSectionLock::CS_TLSDATA);	// S-03
 		TLSDCArray.insert(&m_bmpCache);
 	}
 	~CThreadLocalInfo()
 	{
+		// S-03: the lock is released at the end of this body, before m_bmpCache is destroyed (its destructor calls GDI).
+		CCriticalSectionLock __lock(CCriticalSectionLock::CS_TLSDATA);
 		TLSDCArray.erase(&m_bmpCache);
 	}
 

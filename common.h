@@ -132,6 +132,7 @@ public:
 		CS_VIRTMEM,
 		CS_DWRITE,
 		CS_DCRELATION,
+		CS_TLSDATA,	// S-03: the list of per-thread data (CTlsData::pArray) and TLSDCArray
 	};
 	CCriticalSectionLock(int index=CS_LIBRARY):
 	  m_index(index)
