@@ -29,6 +29,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$FontArgs = @($FontArgs | Where-Object { $_ })   # 空の配列が "" 1 つで渡ってくることがあるので取り除く
 $OutDir = [IO.Path]::GetFullPath($OutDir)
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $Tool = [IO.Path]::GetFullPath($Tool)
