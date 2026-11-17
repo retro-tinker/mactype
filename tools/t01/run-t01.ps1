@@ -171,7 +171,9 @@ $times = @{ base = @(); head = @() }
 for ($i = 1; $i -le $SpeedRuns; $i++) {
     foreach ($label in 'base', 'head') {
         $name = "speed-$label-$i"
-        $code = RunTool $name (@('--dll', $dlls[$label], '--repeat', "$SpeedRepeat", '--no-gdi-check') + $FontArgs)
+        # 素の GDI の 1 周（--no-gdi-check を付けない）を先に回し、GDI 側のフォント読み込みを済ませてから測る。
+        # こうすると pass 1（cold）は、MacType 自身のキャッシュが空の状態の時間になる
+        $code = RunTool $name (@('--dll', $dlls[$label], '--repeat', "$SpeedRepeat") + $FontArgs)
         if ($code -ne 0) { Bad "${name}: failed (exit $code)"; continue }
         $line = Get-Content (Join-Path $OutDir "$name.log") | Where-Object { $_ -match '^# TIME ' } | Select-Object -First 1
         if ($line -match 'cold_ms=([\d.]+) warm_ms_per_pass=([\d.]+)') {
