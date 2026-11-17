@@ -9,7 +9,8 @@
 # 3. 比べる:
 #    - base と head の単スレッドのハッシュが、全ケースで同じ        → 違えば失敗
 #    - head の複数スレッドのハッシュが、head の単スレッドと同じ      → 違えば失敗
-#    - base の複数スレッド（改造前のコード）が落ちた・ずれた場合は、警告として残す（S-01 などの再現）
+#    - 複数スレッドで落ちた・ずれた場合: base でも同じく失敗していれば「改造前からある問題」として警告にとどめる。
+#      base は通って head だけ失敗したら、改造で悪くなったので失敗（S-01 などを直した後は、head が通るはず）
 # 4. 速度: base と head を交互に数回動かし、中央値を出す（参考値）。
 #
 # 例: pwsh tools/t01/run-t01.ps1 -Tool t01.exe -BaseDll base\MacType64.Core.dll -HeadDll head\MacType64.Core.dll -OutDir out
@@ -111,7 +112,7 @@ function CompareHashes([string] $what, $a, $b, [string] $la, [string] $lb) {
 $dlls = [ordered]@{ base = (Prepare 'base' $BaseDll); head = (Prepare 'head' $HeadDll) }
 
 # ---- 単スレッド・複数スレッド
-$st = @{}; $mt = @{}
+$st = @{}; $mt = @{}; $mtFail = @{}
 foreach ($label in $dlls.Keys) {
     $dll = $dlls[$label]
     $tsv = Join-Path $OutDir "$label-st.tsv"
@@ -122,8 +123,9 @@ foreach ($label in $dlls.Keys) {
     $tsv = Join-Path $OutDir "$label-mt.tsv"
     $code = RunTool "$label-mt" (@('--dll', $dll, '--out', $tsv, '--threads', "$Threads", '--rounds', "$Rounds") + $FontArgs)
     if ($code -ne 0) {
-        $msg = ("{0}: multi-thread run failed (exit 0x{1:x8}). See {0}-mt.log" -f $label, $code)
-        if ($label -eq 'base') { Warn "$msg  (pre-change code; kept as a warning)" } else { Bad $msg }
+        $mtFail[$label] = ("{0}: multi-thread run failed (exit 0x{1:x8}). See {0}-mt.log" -f $label, $code)
+        Get-Content (Join-Path $OutDir "$label-mt.log") | Where-Object { $_ -match '^(CRASH|  )' } |
+            Select-Object -First 24 | ForEach-Object { $summary.Add("    $_") }
     } elseif (Test-Path $tsv) { $mt[$label] = ReadHashes $tsv }
 }
 
@@ -141,12 +143,19 @@ foreach ($label in 'base', 'head') {
     if ($st.ContainsKey($label) -and $mt.ContainsKey($label)) {
         $d = CompareHashes 'mt' $st[$label] $mt[$label] 'single' 'multi'
         if ($d.Count) {
-            $msg = "${label}: multi-thread result differs from single-thread in $($d.Count) cases"
-            if ($label -eq 'base') { Warn $msg } else { Bad $msg }
-            $d | Select-Object -First 10 | ForEach-Object { Note "  - $_" }
+            $mtFail[$label] = "${label}: multi-thread result differs from single-thread in $($d.Count) cases"
+            $d | Select-Object -First 10 | ForEach-Object { $summary.Add("  - $_") }
         } else {
             Note "${label}: multi-thread ($Threads threads x $Rounds rounds) matches single-thread"
         }
+    }
+}
+if ($mtFail.ContainsKey('base')) { Warn "$($mtFail['base'])  (pre-change code)" }
+if ($mtFail.ContainsKey('head')) {
+    if ($mtFail.ContainsKey('base')) {
+        Warn "$($mtFail['head'])  (base fails too: pre-existing problem, not caused by this change)"
+    } else {
+        Bad "$($mtFail['head'])  (base passed: this change made it worse)"
     }
 }
 foreach ($label in 'base', 'head') {

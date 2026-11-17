@@ -19,6 +19,7 @@
 //             3 = DLL を読み込めない、4 = 引数の誤り、それ以外 = 例外で落ちた（例外コード）
 
 #include <windows.h>
+#include <dbghelp.h>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -62,11 +63,13 @@ struct Case {
 	DrawMode mode;
 	Variant variant;
 	int w, h;   // 画面（DIB）の大きさ
+	bool linked;   // フォント自身に文字がなく、フォントリンクなどに頼るケース（MacType が描かないこともある）
 };
 
 struct Result {
 	uint64_t hash = 0;
 	uint32_t colorPx = 0;   // R, G, B がそろっていない画素の数（LCD で描かれたかの目安）
+	double drawMs = 0;      // 文字を描く部分だけの時間（下地の塗りとハッシュは含めない）
 };
 
 static std::wstring g_sweepText;   // 漢字を多く並べた文字列（グリフキャッシュの間引きを起こすため）
@@ -128,8 +131,72 @@ static std::string Hex(uint64_t v)
 
 // ---------------------------------------------------------------- 落ちたときの記録
 
+static std::wstring g_symPath;   // PDB を探すフォルダ（DLL の置き場所）
+static volatile LONG g_crashing = 0;
+
+// 落ちたスレッドの呼び出し履歴を、PDB があれば関数名と行番号つきで出す
+static void PrintStack(const CONTEXT* ctxIn)
+{
+	HANDLE proc = GetCurrentProcess();
+	SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_FAIL_CRITICAL_ERRORS);
+	if (!SymInitializeW(proc, g_symPath.empty() ? nullptr : g_symPath.c_str(), TRUE)) {
+		printf("  (SymInitialize failed: %lu)\n", GetLastError());
+		return;
+	}
+	CONTEXT ctx = *ctxIn;
+	STACKFRAME64 sf = {};
+#ifdef _WIN64
+	const DWORD machine = IMAGE_FILE_MACHINE_AMD64;
+	sf.AddrPC.Offset = ctx.Rip; sf.AddrFrame.Offset = ctx.Rbp; sf.AddrStack.Offset = ctx.Rsp;
+#else
+	const DWORD machine = IMAGE_FILE_MACHINE_I386;
+	sf.AddrPC.Offset = ctx.Eip; sf.AddrFrame.Offset = ctx.Ebp; sf.AddrStack.Offset = ctx.Esp;
+#endif
+	sf.AddrPC.Mode = sf.AddrFrame.Mode = sf.AddrStack.Mode = AddrModeFlat;
+	for (int i = 0; i < 48; ++i) {
+		if (!StackWalk64(machine, proc, GetCurrentThread(), &sf, &ctx, nullptr,
+			SymFunctionTableAccess64, SymGetModuleBase64, nullptr) || !sf.AddrPC.Offset)
+			break;
+		const DWORD64 pc = sf.AddrPC.Offset;
+		char modName[MAX_PATH] = "?";
+		const DWORD64 base = SymGetModuleBase64(proc, pc);
+		if (base) {
+			char full[MAX_PATH];
+			if (GetModuleFileNameA((HMODULE)(ULONG_PTR)base, full, MAX_PATH)) {
+				const char* s = strrchr(full, '\\');
+				lstrcpynA(modName, s ? s + 1 : full, MAX_PATH);
+			}
+		}
+		alignas(SYMBOL_INFO) char symBuf[sizeof(SYMBOL_INFO) + 512];
+		SYMBOL_INFO* sym = (SYMBOL_INFO*)symBuf;
+		memset(symBuf, 0, sizeof(symBuf));
+		sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+		sym->MaxNameLen = 511;
+		DWORD64 disp = 0;
+		char where[800];
+		if (SymFromAddr(proc, pc, &disp, sym))
+			snprintf(where, sizeof(where), "%s!%s+0x%llx", modName, sym->Name, (unsigned long long)disp);
+		else
+			snprintf(where, sizeof(where), "%s+0x%llx", modName, (unsigned long long)(pc - base));
+		IMAGEHLP_LINE64 line = {};
+		line.SizeOfStruct = sizeof(line);
+		DWORD ldisp = 0;
+		if (SymGetLineFromAddr64(proc, pc, &ldisp, &line)) {
+			const char* f = strrchr(line.FileName, '\\');
+			printf("  #%02d %s  (%s:%lu)\n", i, where, f ? f + 1 : line.FileName, line.LineNumber);
+		} else {
+			printf("  #%02d %s\n", i, where);
+		}
+	}
+	fflush(stdout);
+}
+
 static LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep)
 {
+	// 複数のスレッドが同時に落ちたら、最初の 1 本だけ記録する
+	if (InterlockedCompareExchange(&g_crashing, 1, 0) != 0) {
+		Sleep(INFINITE);
+	}
 	const EXCEPTION_RECORD* er = ep->ExceptionRecord;
 	wchar_t mod[MAX_PATH] = L"?";
 	HMODULE hm = nullptr;
@@ -140,7 +207,12 @@ static LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep)
 	printf("CRASH: exception 0x%08lx at %p (module %s + 0x%llx), thread %lu\n",
 		(unsigned long)er->ExceptionCode, er->ExceptionAddress, ToUtf8(mod).c_str(),
 		(unsigned long long)((const char*)er->ExceptionAddress - (const char*)hm), GetCurrentThreadId());
+	if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2)
+		printf("  access violation: %s address %p\n",
+			er->ExceptionInformation[0] == 0 ? "read" : (er->ExceptionInformation[0] == 1 ? "write" : "execute"),
+			(void*)er->ExceptionInformation[1]);
 	fflush(stdout);
+	PrintStack(ep->ContextRecord);
 	if (g_out) {
 		fprintf(g_out, "# CRASH: exception 0x%08lx module %s\n", (unsigned long)er->ExceptionCode, ToUtf8(mod).c_str());
 		fflush(g_out);
@@ -190,6 +262,28 @@ static bool FaceCovers(const std::wstring& face, const std::wstring& text, int* 
 	DeleteDC(dc);
 	if (missing) *missing = miss;
 	return miss == 0;
+}
+
+// レジストリの SystemLink（フォントリンク先の一覧）。FontLink=2 の MacType はこれを読む
+static std::string SystemLinkInfo(const std::wstring& face)
+{
+	HKEY key;
+	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\FontLink\\SystemLink",
+		0, KEY_READ, &key) != ERROR_SUCCESS)
+		return "no SystemLink key";
+	DWORD type = 0, size = 0;
+	std::string out = "no SystemLink entry";
+	if (RegQueryValueExW(key, face.c_str(), nullptr, &type, nullptr, &size) == ERROR_SUCCESS && type == REG_MULTI_SZ) {
+		std::vector<wchar_t> buf(size / sizeof(wchar_t) + 2, 0);
+		if (RegQueryValueExW(key, face.c_str(), nullptr, &type, (LPBYTE)buf.data(), &size) == ERROR_SUCCESS) {
+			int n = 0;
+			std::wstring first;
+			for (const wchar_t* p = buf.data(); *p; p += lstrlenW(p) + 1) { if (!n) first = p; ++n; }
+			out = "SystemLink " + std::to_string(n) + " entries, first: " + ToUtf8(first);
+		}
+	}
+	RegCloseKey(key);
+	return out;
 }
 
 // U+4E00 から順に、フォントが持っている漢字を count 個集める
@@ -307,6 +401,7 @@ static const wchar_t* CaseText(const Case& k, int* len)
 static Result DrawCase(const Case& k, Canvas& c)
 {
 	FillBackground(c, k.mode);
+	const double t0 = NowMs();
 
 	LOGFONTW lf = {};
 	lf.lfHeight = k.height;
@@ -370,7 +465,11 @@ static Result DrawCase(const Case& k, Canvas& c)
 	}
 	SelectObject(c.dc, oldFont);
 	DeleteObject(font);
-	return HashCanvas(c);
+	GdiFlush();
+	const double t1 = NowMs();
+	Result r = HashCanvas(c);
+	r.drawMs = t1 - t0;
+	return r;
 }
 
 // ケースごとに使う DIB（大きさ別に 1 枚ずつ、スレッドごと）
@@ -415,6 +514,9 @@ static void AddCase(std::vector<Case>& cases, const std::wstring& face, int heig
 		k.h = 2 * (-height) + 24;
 	}
 	k.id = MakeId(face, height, weight, italic, t, m, v);
+	int len = 0;
+	const wchar_t* s = CaseText(k, &len);
+	k.linked = !FaceCovers(face, std::wstring(s, len));
 	cases.push_back(k);
 }
 
@@ -590,7 +692,7 @@ int wmain(int argc, wchar_t** argv)
 	std::vector<std::wstring> facesEN, facesJP;
 	for (auto f : kFacesEN) {
 		bool ok = FaceExists(f);
-		Info("font %-16s %s", ToUtf8(f).c_str(), ok ? "found" : "missing");
+		Info("font %-16s %s; %s", ToUtf8(f).c_str(), ok ? "found" : "missing", SystemLinkInfo(f).c_str());
 		if (ok) facesEN.push_back(f);
 	}
 	std::vector<std::wstring> jpCandidates(std::begin(kFacesJP), std::end(kFacesJP));
@@ -676,25 +778,27 @@ int wmain(int argc, wchar_t** argv)
 
 	if (threads == 0) {
 		// ---- 単スレッド
+		// 時間は「文字を描く部分」だけを足し合わせる（下地の塗りとハッシュ計算は除く）
 		CanvasSet cs;
-		double t0 = NowMs();
-		for (size_t i = 0; i < cases.size(); ++i)
+		double cold = 0;
+		for (size_t i = 0; i < cases.size(); ++i) {
 			mt[i] = DrawCase(cases[i], *cs.Get(cases[i].w, cases[i].h));
-		const double cold = NowMs() - t0;
-		Info("mactype pass 1 (cold cache): %.1f ms", cold);
+			cold += mt[i].drawMs;
+		}
+		Info("mactype pass 1 (cold cache): %.1f ms drawing", cold);
 		if (repeat > 1) {
 			int unstable = 0;
-			t0 = NowMs();
+			double warm = 0;
 			for (int r = 1; r < repeat; ++r)
 				for (size_t i = 0; i < cases.size(); ++i) {
 					Result x = DrawCase(cases[i], *cs.Get(cases[i].w, cases[i].h));
+					warm += x.drawMs;
 					if (x.hash != mt[i].hash) {
 						if (unstable++ < 10)
 							Fail("pass %d differs from pass 1: %s", r + 1, ToUtf8(cases[i].id).c_str());
 					}
 				}
-			const double warm = NowMs() - t0;
-			Info("mactype pass 2..%d (warm): total %.1f ms, %.2f ms/pass", repeat, warm, warm / (repeat - 1));
+			Info("mactype pass 2..%d (warm): %.1f ms drawing, %.2f ms/pass", repeat, warm, warm / (repeat - 1));
 			Info("TIME cold_ms=%.1f warm_ms_per_pass=%.2f passes=%d cases=%u", cold, warm / (repeat - 1), repeat - 1,
 				(unsigned)cases.size());
 			if (unstable) { Fail("%d renders differ from pass 1", unstable); ++failures; }
@@ -737,9 +841,20 @@ int wmain(int argc, wchar_t** argv)
 	}
 
 	// ---- MacType が効いているか（素の GDI と違う画素になっているか）
+	// フォント自身が全文字を持つケースだけを必須にする。フォントリンクに頼るケース（欧文フォントで日本語など）は、
+	// リンク先の設定（レジストリの SystemLink）次第で MacType が素の GDI に任せることがあるので、数を出すだけ
 	if (gdiCheck) {
-		int same = 0, noColor = 0, opaqueCases = 0;
+		int same = 0, noColor = 0, opaqueCases = 0, checked = 0, linked = 0, linkedSame = 0;
 		for (size_t i = 0; i < cases.size(); ++i) {
+			if (cases[i].linked) {
+				++linked;
+				if (mt[i].hash == gdi[i].hash) {
+					++linkedSame;
+					Info("linked case drawn by plain GDI: %s", ToUtf8(cases[i].id).c_str());
+				}
+				continue;
+			}
+			++checked;
 			if (mt[i].hash == gdi[i].hash) {
 				if (same++ < 10) Fail("same pixels as plain GDI (MacType not effective?): %s", ToUtf8(cases[i].id).c_str());
 			}
@@ -752,8 +867,9 @@ int wmain(int argc, wchar_t** argv)
 				}
 			}
 		}
-		Info("effect: %u of %u cases differ from plain GDI; %d of %d black/white cases have LCD color fringes",
-			(unsigned)(cases.size() - same), (unsigned)cases.size(), opaqueCases - noColor, opaqueCases);
+		Info("effect: %d of %d cases differ from plain GDI; %d of %d black/white cases have LCD color fringes",
+			checked - same, checked, opaqueCases - noColor, opaqueCases);
+		Info("linked cases (font lacks some glyphs, not required): %d, of which %d drawn by plain GDI", linked, linkedSame);
 		if (same) { Fail("%d cases look like plain GDI", same); ++failures; }
 		if (noColor) { Fail("%d black/white cases without color fringes", noColor); ++failures; }
 	}

@@ -153,7 +153,7 @@ jobs:
           call "%VSPATH%\VC\Auxiliary\Build\vcvarsall.bat" %VCARCH% || exit /b 1
           mkdir out\t01 2>nul
           cl /nologo /utf-8 /std:c++17 /O2 /EHsc /MT /W4 /DUNICODE /D_UNICODE mactype\tools\t01\t01.cpp ^
-            /Fo:out\t01\ /Fe:out\t01\t01.exe /link gdi32.lib user32.lib advapi32.lib || exit /b 1
+            /Fo:out\t01\ /Fe:out\t01\t01.exe /link gdi32.lib user32.lib advapi32.lib dbghelp.lib || exit /b 1
 
       # ---------- 日本語フォントの確認 ----------
       # ランナーに日本語フォントがなければ（または手動実行で指定したら）、SIL OFL 1.1 の M PLUS 1p を
